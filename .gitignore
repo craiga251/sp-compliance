@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+.terraform/
+*.tfvars
+terraform.tfvars
+
+# GCP credentials
+*credentials*.json
+*service-account*.json
+
+# VS Code
+.vscode/
