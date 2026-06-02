@@ -17,3 +17,13 @@ output "storage_bucket_url" {
   description = "Cloud Storage bucket URL"
   value       = google_storage_bucket.sp_compliance_raw.url
 }
+
+output "principals_table" {
+  description = "BigQuery principals table ID"
+  value       = google_bigquery_table.principals.table_id
+}
+
+output "permissions_table" {
+  description = "BigQuery permissions table ID"
+  value       = google_bigquery_table.permissions.table_id
+}

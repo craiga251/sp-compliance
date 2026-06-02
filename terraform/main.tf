@@ -66,21 +66,38 @@ resource "google_bigquery_table" "principals" {
   dataset_id          = google_bigquery_dataset.sp_compliance.dataset_id
   table_id            = "principals"
   deletion_protection = false
-  description         = "Core SP inventory"
+  description         = "Core SP inventory - one row per login"
 
   schema = jsonencode([
-    { name = "principal_id",          type = "STRING",    mode = "REQUIRED" },
-    { name = "principal_name",        type = "STRING",    mode = "REQUIRED" },
-    { name = "principal_type",        type = "STRING",    mode = "NULLABLE" },
-    { name = "environment",           type = "STRING",    mode = "NULLABLE" },
-    { name = "database",              type = "STRING",    mode = "NULLABLE" },
-    { name = "sql_role",              type = "STRING",    mode = "NULLABLE" },
-    { name = "direct_connect",        type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "last_used_days_ago",    type = "INTEGER",   mode = "NULLABLE" },
-    { name = "created_days_ago",      type = "INTEGER",   mode = "NULLABLE" },
-    { name = "has_application_owner", type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "justification_on_file", type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "notes",                 type = "STRING",    mode = "NULLABLE" }
+    { name = "principal_id",       type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_name",     type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_type",     type = "STRING",    mode = "NULLABLE" },
+    { name = "sql_instance",       type = "STRING",    mode = "NULLABLE" },
+    { name = "login_enabled",      type = "STRING",    mode = "NULLABLE" },
+    { name = "interactive",        type = "STRING",    mode = "NULLABLE" },
+    { name = "privilege_summary",  type = "STRING",    mode = "NULLABLE" },
+    { name = "created_date",       type = "STRING",    mode = "NULLABLE" },
+    { name = "scan_run_id",        type = "STRING",    mode = "NULLABLE" }
+  ])
+}
+
+# ── BigQuery table: permissions ───────────────────────────────────────────────
+resource "google_bigquery_table" "permissions" {
+  dataset_id          = google_bigquery_dataset.sp_compliance.dataset_id
+  table_id            = "permissions"
+  deletion_protection = false
+  description         = "Native SQL permissions - one row per permission per login"
+
+  schema = jsonencode([
+    { name = "permission_id",      type = "STRING",    mode = "REQUIRED" },
+    { name = "scan_run_id",        type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_id",       type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_name",     type = "STRING",    mode = "NULLABLE" },
+    { name = "sql_instance",       type = "STRING",    mode = "NULLABLE" },
+    { name = "database_name",      type = "STRING",    mode = "NULLABLE" },
+    { name = "native_permission",  type = "STRING",    mode = "NULLABLE" },
+    { name = "role_mapping",       type = "STRING",    mode = "NULLABLE" },
+    { name = "created_at",         type = "TIMESTAMP", mode = "NULLABLE" }
   ])
 }
 
@@ -92,15 +109,15 @@ resource "google_bigquery_table" "classifications" {
   description         = "Risk tier and score per SP per scan run"
 
   schema = jsonencode([
-    { name = "classification_id",   type = "STRING",    mode = "REQUIRED" },
-    { name = "scan_run_id",         type = "STRING",    mode = "REQUIRED" },
-    { name = "principal_id",        type = "STRING",    mode = "REQUIRED" },
-    { name = "principal_name",      type = "STRING",    mode = "NULLABLE" },
-    { name = "risk_tier",           type = "STRING",    mode = "NULLABLE" },
-    { name = "score",               type = "INTEGER",   mode = "NULLABLE" },
-    { name = "finding_count",       type = "INTEGER",   mode = "NULLABLE" },
-    { name = "recommended_action",  type = "STRING",    mode = "NULLABLE" },
-    { name = "classified_at",       type = "TIMESTAMP", mode = "NULLABLE" }
+    { name = "classification_id",  type = "STRING",    mode = "REQUIRED" },
+    { name = "scan_run_id",        type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_id",       type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_name",     type = "STRING",    mode = "NULLABLE" },
+    { name = "risk_tier",          type = "STRING",    mode = "NULLABLE" },
+    { name = "score",              type = "INTEGER",   mode = "NULLABLE" },
+    { name = "finding_count",      type = "INTEGER",   mode = "NULLABLE" },
+    { name = "recommended_action", type = "STRING",    mode = "NULLABLE" },
+    { name = "classified_at",      type = "TIMESTAMP", mode = "NULLABLE" }
   ])
 }
 
@@ -112,13 +129,13 @@ resource "google_bigquery_table" "findings" {
   description         = "Individual control failures per SP per scan run"
 
   schema = jsonencode([
-    { name = "finding_id",      type = "STRING",    mode = "REQUIRED" },
-    { name = "scan_run_id",     type = "STRING",    mode = "REQUIRED" },
-    { name = "principal_id",    type = "STRING",    mode = "REQUIRED" },
-    { name = "principal_name",  type = "STRING",    mode = "NULLABLE" },
-    { name = "finding_text",    type = "STRING",    mode = "NULLABLE" },
-    { name = "risk_tier",       type = "STRING",    mode = "NULLABLE" },
-    { name = "created_at",      type = "TIMESTAMP", mode = "NULLABLE" }
+    { name = "finding_id",         type = "STRING",    mode = "REQUIRED" },
+    { name = "scan_run_id",        type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_id",       type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_name",     type = "STRING",    mode = "NULLABLE" },
+    { name = "finding_text",       type = "STRING",    mode = "NULLABLE" },
+    { name = "risk_tier",          type = "STRING",    mode = "NULLABLE" },
+    { name = "created_at",         type = "TIMESTAMP", mode = "NULLABLE" }
   ])
 }
 
@@ -130,13 +147,13 @@ resource "google_bigquery_table" "remediation_packs" {
   description         = "Generated remediation actions per SP"
 
   schema = jsonencode([
-    { name = "pack_id",             type = "STRING",    mode = "REQUIRED" },
-    { name = "principal_id",        type = "STRING",    mode = "REQUIRED" },
-    { name = "principal_name",      type = "STRING",    mode = "NULLABLE" },
-    { name = "risk_tier",           type = "STRING",    mode = "NULLABLE" },
-    { name = "action_summary",      type = "STRING",    mode = "NULLABLE" },
-    { name = "snow_cr_template",    type = "STRING",    mode = "NULLABLE" },
-    { name = "generated_at",        type = "TIMESTAMP", mode = "NULLABLE" }
+    { name = "pack_id",            type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_id",       type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_name",     type = "STRING",    mode = "NULLABLE" },
+    { name = "risk_tier",          type = "STRING",    mode = "NULLABLE" },
+    { name = "action_summary",     type = "STRING",    mode = "NULLABLE" },
+    { name = "snow_cr_template",   type = "STRING",    mode = "NULLABLE" },
+    { name = "generated_at",       type = "TIMESTAMP", mode = "NULLABLE" }
   ])
 }
 
@@ -148,14 +165,14 @@ resource "google_bigquery_table" "scan_runs" {
   description         = "Audit trail of every classification scan"
 
   schema = jsonencode([
-    { name = "scan_run_id",       type = "STRING",    mode = "REQUIRED" },
-    { name = "started_at",        type = "TIMESTAMP", mode = "NULLABLE" },
-    { name = "completed_at",      type = "TIMESTAMP", mode = "NULLABLE" },
-    { name = "total_principals",  type = "INTEGER",   mode = "NULLABLE" },
-    { name = "critical_count",    type = "INTEGER",   mode = "NULLABLE" },
-    { name = "high_count",        type = "INTEGER",   mode = "NULLABLE" },
-    { name = "medium_count",      type = "INTEGER",   mode = "NULLABLE" },
-    { name = "low_count",         type = "INTEGER",   mode = "NULLABLE" },
-    { name = "source",            type = "STRING",    mode = "NULLABLE" }
+    { name = "scan_run_id",        type = "STRING",    mode = "REQUIRED" },
+    { name = "started_at",         type = "TIMESTAMP", mode = "NULLABLE" },
+    { name = "completed_at",       type = "TIMESTAMP", mode = "NULLABLE" },
+    { name = "total_principals",   type = "INTEGER",   mode = "NULLABLE" },
+    { name = "critical_count",     type = "INTEGER",   mode = "NULLABLE" },
+    { name = "high_count",         type = "INTEGER",   mode = "NULLABLE" },
+    { name = "medium_count",       type = "INTEGER",   mode = "NULLABLE" },
+    { name = "low_count",          type = "INTEGER",   mode = "NULLABLE" },
+    { name = "source",             type = "STRING",    mode = "NULLABLE" }
   ])
 }
