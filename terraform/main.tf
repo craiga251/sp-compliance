@@ -177,6 +177,33 @@ resource "google_bigquery_table" "scan_runs" {
   ])
 }
 
+# ── BigQuery table: finding_actions ──────────────────────────────────────────
+resource "google_bigquery_table" "finding_actions" {
+  dataset_id          = google_bigquery_dataset.sp_compliance.dataset_id
+  table_id            = "finding_actions"
+  deletion_protection = false
+  description         = "Audit trail of all remediation and risk acceptance actions"
+
+  schema = jsonencode([
+    { name = "action_id",          type = "STRING",    mode = "REQUIRED" },
+    { name = "finding_id",         type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_id",       type = "STRING",    mode = "REQUIRED" },
+    { name = "principal_name",     type = "STRING",    mode = "NULLABLE" },
+    { name = "native_permission",  type = "STRING",    mode = "NULLABLE" },
+    { name = "database_name",      type = "STRING",    mode = "NULLABLE" },
+    { name = "sql_instance",       type = "STRING",    mode = "NULLABLE" },
+    { name = "action_type",        type = "STRING",    mode = "NULLABLE" },
+    { name = "status",             type = "STRING",    mode = "NULLABLE" },
+    { name = "environment",        type = "STRING",    mode = "NULLABLE" },
+    { name = "snow_cr_number",     type = "STRING",    mode = "NULLABLE" },
+    { name = "risk_ref",           type = "STRING",    mode = "NULLABLE" },
+    { name = "notes",              type = "STRING",    mode = "NULLABLE" },
+    { name = "actioned_by",        type = "STRING",    mode = "NULLABLE" },
+    { name = "actioned_at",        type = "TIMESTAMP", mode = "NULLABLE" },
+    { name = "review_date",        type = "STRING",    mode = "NULLABLE" }
+  ])
+}
+
 # ── Artifact Registry — stores container images ───────────────────────────────
 resource "google_artifact_registry_repository" "sp_compliance" {
   location      = var.region
@@ -203,6 +230,13 @@ resource "google_project_iam_member" "cloudrun_bq_reader" {
 resource "google_project_iam_member" "cloudrun_bq_job_user" {
   project = var.project_id
   role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.cloudrun_sa.email}"
+}
+
+# ── Grant Cloud Run SA write access to BigQuery ───────────────────────────────
+resource "google_project_iam_member" "cloudrun_bq_editor" {
+  project = var.project_id
+  role    = "roles/bigquery.dataEditor"
   member  = "serviceAccount:${google_service_account.cloudrun_sa.email}"
 }
 

@@ -1,20 +1,33 @@
 # SP Compliance Portal - Streamlit frontend
-# Reads live data from BigQuery on GCP
-# Classification engine runs at load time
+# Three level navigation:
+# Level 1 — Server instance summary
+# Level 2 — Login and native permission grid per server
+# Level 3 — Remediation pack with SIT/UAT/PROD change raising
+#            and risk acceptance with audit trail
 
 import streamlit as st
 import plotly.express as px
+import json
+import uuid
 import sys
 from pathlib import Path
+from datetime import datetime, date
 
 # Add engine to path
 sys.path.append(str(Path(__file__).parent))
 from engine.bigquery_client import (
+    get_server_summary,
+    get_permissions_for_instance,
     get_classifications,
     get_findings_for_principal,
     get_permissions_for_principal,
+    get_permissions_grouped,
     get_scan_summary,
+    get_actions_for_permission,
+    save_remediation_action,
+    save_risk_acceptance,
 )
+from engine.remediation import generate_remediation_pack
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -31,162 +44,453 @@ TIER_COLOURS = {
     "LOW":      "#2ca02c",
 }
 
+TIER_ICONS = {
+    "CRITICAL": "🔴",
+    "HIGH":     "🟠",
+    "MEDIUM":   "🟡",
+    "LOW":      "🟢",
+}
+
+# ── Session state initialisation ──────────────────────────────────────────────
+if "selected_instance" not in st.session_state:
+    st.session_state.selected_instance = None
+if "selected_permission" not in st.session_state:
+    st.session_state.selected_permission = None
+if "view_level" not in st.session_state:
+    st.session_state.view_level = 1
+
 # ── Load data from BigQuery ───────────────────────────────────────────────────
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_classifications():
-    return get_classifications()
+@st.cache_data(ttl=300)
+def load_server_summary():
+    return get_server_summary()
 
 @st.cache_data(ttl=300)
 def load_scan_summary():
     return get_scan_summary()
 
-df      = load_classifications()
-summary = load_scan_summary()
+@st.cache_data(ttl=300)
+def load_instance_permissions(sql_instance: str):
+    return get_permissions_for_instance(sql_instance)
+
+summary    = load_scan_summary()
+servers_df = load_server_summary()
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🔐 Service Principal Compliance Portal")
-st.caption(f"Live data from BigQuery — sp-compliance.sp_compliance")
+st.caption("Live data from BigQuery — sp-compliance.sp_compliance")
 
 st.divider()
 
 # ── Summary metrics row ───────────────────────────────────────────────────────
 col1, col2, col3, col4, col5 = st.columns(5)
-
-col1.metric("Total SPs",  summary.get("total_principals", len(df)))
-col2.metric("Critical",   summary.get("critical_count",   len(df[df["risk_tier"] == "CRITICAL"])))
-col3.metric("High",       summary.get("high_count",       len(df[df["risk_tier"] == "HIGH"])))
-col4.metric("Medium",     summary.get("medium_count",     len(df[df["risk_tier"] == "MEDIUM"])))
-col5.metric("Low",        summary.get("low_count",        len(df[df["risk_tier"] == "LOW"])))
-
-st.divider()
-
-# ── Charts row ────────────────────────────────────────────────────────────────
-chart_col1, chart_col2 = st.columns(2)
-
-with chart_col1:
-    st.subheader("Risk Distribution")
-    tier_counts = (
-        df["risk_tier"]
-        .value_counts()
-        .reindex(["CRITICAL", "HIGH", "MEDIUM", "LOW"])
-        .reset_index()
-    )
-    tier_counts.columns = ["risk_tier", "count"]
-    fig1 = px.bar(
-        tier_counts,
-        x="risk_tier",
-        y="count",
-        color="risk_tier",
-        color_discrete_map=TIER_COLOURS,
-        labels={"risk_tier": "Risk Tier", "count": "Number of SPs"},
-    )
-    fig1.update_layout(showlegend=False)
-    st.plotly_chart(fig1, use_container_width=True)
-
-with chart_col2:
-    st.subheader("Risk Score by Principal")
-    fig2 = px.bar(
-        df.sort_values("score", ascending=False),
-        x="principal_name",
-        y="score",
-        color="risk_tier",
-        color_discrete_map=TIER_COLOURS,
-        labels={"principal_name": "Principal", "score": "Risk Score"},
-    )
-    fig2.update_layout(showlegend=True, xaxis_tickangle=-45)
-    st.plotly_chart(fig2, use_container_width=True)
+col1.metric("Total SPs",  summary.get("total_principals", 0))
+col2.metric("Critical",   summary.get("critical_count",   0))
+col3.metric("High",       summary.get("high_count",       0))
+col4.metric("Medium",     summary.get("medium_count",     0))
+col5.metric("Low",        summary.get("low_count",        0))
 
 st.divider()
 
-# ── Filters ───────────────────────────────────────────────────────────────────
-st.subheader("Principal Inventory")
+# ══════════════════════════════════════════════════════════════════════════════
+# LEVEL 1 — SERVER INSTANCE SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+if st.session_state.view_level == 1:
 
-filter_col1, filter_col2, filter_col3 = st.columns(3)
+    st.subheader("Server Instance Summary")
+    st.caption("One row per server — click View Details to inspect logins and permissions")
 
-with filter_col1:
-    tier_filter = st.multiselect(
-        "Filter by Risk Tier",
-        options=["CRITICAL", "HIGH", "MEDIUM", "LOW"],
-        default=["CRITICAL", "HIGH", "MEDIUM", "LOW"]
-    )
-
-with filter_col2:
-    instance_options = sorted(df["sql_instance"].dropna().unique().tolist())
-    instance_filter = st.multiselect(
-        "Filter by SQL Instance",
-        options=instance_options,
-        default=instance_options
-    )
-
-with filter_col3:
-    search = st.text_input("Search by Principal Name", "")
-
-# ── Apply filters ─────────────────────────────────────────────────────────────
-filtered = df[
-    (df["risk_tier"].isin(tier_filter)) &
-    (df["sql_instance"].isin(instance_filter))
-].copy()
-
-if search:
-    filtered = filtered[
-        filtered["principal_name"].str.contains(search, case=False)
-    ]
-
-# ── Inventory table ───────────────────────────────────────────────────────────
-display_cols = [
-    "principal_name", "risk_tier", "score",
-    "principal_type", "sql_instance",
-    "login_enabled", "interactive",
-    "privilege_summary", "finding_count"
-]
-
-st.dataframe(
-    filtered[display_cols].sort_values("score", ascending=False),
-    use_container_width=True,
-    hide_index=True,
-)
-
-st.divider()
-
-# ── Drilldown ─────────────────────────────────────────────────────────────────
-st.subheader("Principal Drilldown")
-
-selected_name = st.selectbox(
-    "Select a principal to inspect",
-    options=df.sort_values("score", ascending=False)["principal_name"].tolist()
-)
-
-selected = df[df["principal_name"] == selected_name].iloc[0]
-
-drill_col1, drill_col2 = st.columns(2)
-
-with drill_col1:
-    st.markdown(f"### {selected['principal_name']}")
-    st.metric("Risk Score", selected["score"])
-    st.write(f"**Risk Tier:** {selected['risk_tier']}")
-    st.write(f"**Principal Type:** {selected['principal_type']}")
-    st.write(f"**SQL Instance:** {selected['sql_instance']}")
-    st.write(f"**Login Enabled:** {selected['login_enabled']}")
-    st.write(f"**Interactive:** {selected['interactive']}")
-    st.write(f"**Privilege Summary:** {selected['privilege_summary']}")
-    st.write(f"**Recommended Action:** {selected['recommended_action']}")
-
-with drill_col2:
-    st.markdown("### Findings")
-    findings_df = get_findings_for_principal(selected["principal_id"])
-    if not findings_df.empty:
-        for _, row in findings_df.iterrows():
-            st.error(f"⚠️ {row['finding_text']}")
+    if servers_df.empty:
+        st.warning("No data available — run the CSV loader first")
     else:
-        st.success("✅ No findings — this principal is compliant")
+        for _, row in servers_df.iterrows():
+            tier     = str(row.get("highest_risk_tier", "LOW"))
+            icon     = TIER_ICONS.get(tier, "⚪")
+            instance = str(row.get("sql_instance", ""))
 
-    st.markdown("### Permissions")
-    perms_df = get_permissions_for_principal(selected["principal_id"])
-    if not perms_df.empty:
+            with st.container():
+                c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 1, 1, 1, 1, 1, 1])
+
+                c1.markdown(f"**{instance}**")
+                c2.markdown(f"{icon} **{tier}**")
+                c3.metric("Logins",   int(row.get("login_count",    0)))
+                c4.metric("Findings", int(row.get("total_findings", 0)))
+                c5.metric("Critical", int(row.get("critical_logins",0)))
+                c6.metric("High",     int(row.get("high_logins",    0)))
+
+                with c7:
+                    if st.button(
+                        "View Details",
+                        key=f"view_{instance}"
+                    ):
+                        st.session_state.selected_instance = instance
+                        st.session_state.view_level        = 2
+                        st.rerun()
+
+            st.divider()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LEVEL 2 — LOGIN AND PERMISSION GRID
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.view_level == 2:
+
+    instance = st.session_state.selected_instance
+
+    # ── Back button ───────────────────────────────────────────────────────────
+    if st.button("◀ Back to Server Summary"):
+        st.session_state.view_level        = 1
+        st.session_state.selected_instance = None
+        st.rerun()
+
+    st.subheader(f"📋 {instance}")
+    st.caption(
+        "One row per login per native permission — "
+        "click Remediate to raise a change or accept risk"
+    )
+
+    perms_df = load_instance_permissions(instance)
+
+    if perms_df.empty:
+        st.warning("No permissions data found for this instance")
+    else:
+        # ── Filters ───────────────────────────────────────────────────────────
+        f1, f2, f3 = st.columns(3)
+
+        with f1:
+            tier_opts = sorted(perms_df["risk_tier"].dropna().unique().tolist())
+            tier_filter = st.multiselect(
+                "Filter by Risk Tier",
+                options=tier_opts,
+                default=tier_opts
+            )
+
+        with f2:
+            login_opts = sorted(
+                perms_df["principal_name"].dropna().unique().tolist()
+            )
+            login_filter = st.multiselect(
+                "Filter by Login",
+                options=login_opts,
+                default=login_opts
+            )
+
+        with f3:
+            perm_search = st.text_input("Search Permission", "")
+
+        # ── Apply filters ─────────────────────────────────────────────────────
+        filtered = perms_df[
+            (perms_df["risk_tier"].isin(tier_filter)) &
+            (perms_df["principal_name"].isin(login_filter))
+        ].copy()
+
+        if perm_search:
+            filtered = filtered[
+                filtered["native_permission"].str.contains(
+                    perm_search, case=False, na=False
+                )
+            ]
+
+        filtered = filtered.sort_values(
+            ["score", "principal_name", "native_permission"],
+            ascending=[False, True, True]
+        )
+
+        st.divider()
+
+        # ── Permission grid ───────────────────────────────────────────────────
+        header = st.columns([2, 2, 1, 1, 1, 1, 1])
+        header[0].markdown("**Login**")
+        header[1].markdown("**Permission**")
+        header[2].markdown("**Role Mapping**")
+        header[3].markdown("**Database**")
+        header[4].markdown("**Risk**")
+        header[5].markdown("**Enabled**")
+        header[6].markdown("**Action**")
+
+        st.divider()
+
+        for idx, row in filtered.iterrows():
+            tier = str(row.get("risk_tier", "LOW"))
+            icon = TIER_ICONS.get(tier, "⚪")
+            perm_key = (
+                f"{row['principal_id']}_"
+                f"{row['native_permission']}_"
+                f"{row['database_name']}"
+            )
+
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 1, 1, 1, 1, 1])
+            c1.write(row.get("principal_name", ""))
+            c2.write(row.get("native_permission", ""))
+            c3.write(row.get("role_mapping", ""))
+            c4.write(row.get("database_name", ""))
+            c5.write(f"{icon} {tier}")
+            c6.write(str(row.get("login_enabled", "")))
+
+            with c7:
+                if st.button(
+                    "Remediate",
+                    key=f"rem_{perm_key}_{idx}"
+                ):
+                    st.session_state.selected_permission = {
+                        "principal_id":      str(row["principal_id"]),
+                        "principal_name":    str(row["principal_name"]),
+                        "native_permission": str(row["native_permission"]),
+                        "role_mapping":      str(row["role_mapping"]),
+                        "database_name":     str(row["database_name"]),
+                        "sql_instance":      str(row["sql_instance"]),
+                        "risk_tier":         tier,
+                        "score":             int(row["score"]),
+                    }
+                    st.session_state.view_level = 3
+                    st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LEVEL 3 — REMEDIATION PACK
+# ══════════════════════════════════════════════════════════════════════════════
+elif st.session_state.view_level == 3:
+
+    perm = st.session_state.selected_permission
+
+    # ── Back button ───────────────────────────────────────────────────────────
+    if st.button("◀ Back to Permission Grid"):
+        st.session_state.view_level          = 2
+        st.session_state.selected_permission = None
+        st.rerun()
+
+    st.subheader("🔧 Remediation Pack")
+
+    # ── Permission summary ────────────────────────────────────────────────────
+    tier = perm["risk_tier"]
+    icon = TIER_ICONS.get(tier, "⚪")
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.markdown(f"**Login**\n\n{perm['principal_name']}")
+    s2.markdown(f"**Permission**\n\n{perm['native_permission']}")
+    s3.markdown(f"**Database**\n\n{perm['database_name']}")
+    s4.markdown(f"**Risk**\n\n{icon} {tier}")
+
+    st.divider()
+
+    # ── Existing actions ──────────────────────────────────────────────────────
+    existing = get_actions_for_permission(
+        perm["principal_id"],
+        perm["native_permission"],
+        perm["database_name"],
+    )
+
+    if not existing.empty:
+        st.markdown("#### Action History")
         st.dataframe(
-            perms_df,
+            existing[[
+                "actioned_at", "action_type", "status",
+                "environment", "snow_cr_number",
+                "risk_ref", "actioned_by", "notes"
+            ]],
             use_container_width=True,
             hide_index=True,
         )
-    else:
-        st.info("No permissions data available")
+        st.divider()
+
+    # ── Action tabs ───────────────────────────────────────────────────────────
+    tab1, tab2 = st.tabs([
+        "🔧 Raise Change Request",
+        "⚠️ Accept Risk"
+    ])
+
+    # ── TAB 1 — Raise Change Request ──────────────────────────────────────────
+    with tab1:
+        st.markdown("#### Raise a Change Request")
+        st.caption(
+            "Changes must progress sequentially: SIT → UAT → PROD. "
+            "Maximum 5 days per stage."
+        )
+
+        env = st.selectbox(
+            "Environment",
+            options=["SIT", "UAT", "PROD"],
+            index=0
+        )
+
+        snow_cr = st.text_input(
+            "ServiceNow CR Number",
+            placeholder="CHG0012345"
+        )
+
+        cr_notes = st.text_area(
+            "Notes",
+            placeholder=(
+                "Describe the investigation outcome "
+                "and reason for remediation"
+            ),
+            height=100
+        )
+
+        actioned_by = st.text_input(
+            "Your Name / Email",
+            placeholder="name@bank.com"
+        )
+
+        # ── SNOW CR preview ───────────────────────────────────────────────────
+        st.markdown("#### ServiceNow CR Template")
+
+        snow_template = {
+            "short_description": (
+                f"Remove {perm['native_permission']} from "
+                f"{perm['principal_name']} on "
+                f"{perm['database_name']} — {env}"
+            ),
+            "description": (
+                f"Login:       {perm['principal_name']}\n"
+                f"Instance:    {perm['sql_instance']}\n"
+                f"Database:    {perm['database_name']}\n"
+                f"Permission:  {perm['native_permission']}\n"
+                f"Role Mapping:{perm['role_mapping']}\n"
+                f"Risk Tier:   {perm['risk_tier']}\n"
+                f"Environment: {env}\n\n"
+                f"Notes: {cr_notes}"
+            ),
+            "category":         "Security",
+            "subcategory":      "Access Management",
+            "urgency":          "1 - High" if tier == "CRITICAL" else "2 - Medium",
+            "impact":           "2 - Medium",
+            "environment":      env,
+            "assignment_group": "IAM Security Team",
+            "test_plan": (
+                f"Verify application function after removing "
+                f"{perm['native_permission']} from "
+                f"{perm['principal_name']}"
+            ),
+            "backout_plan": (
+                f"Restore {perm['native_permission']} to "
+                f"{perm['principal_name']} on "
+                f"{perm['database_name']} if impact confirmed"
+            ),
+        }
+
+        st.code(json.dumps(snow_template, indent=2), language="json")
+
+        st.download_button(
+            label=f"⬇️ Download {env} CR Template (JSON)",
+            data=json.dumps(snow_template, indent=2),
+            file_name=(
+                f"CR_{env}_"
+                f"{perm['principal_name'].replace(chr(92), '_')}_"
+                f"{perm['native_permission']}.json"
+            ),
+            mime="application/json"
+        )
+
+        st.divider()
+
+        if st.button(f"✅ Confirm — Save {env} Change to Audit Trail"):
+            if not snow_cr:
+                st.error("Please enter a ServiceNow CR number")
+            elif not actioned_by:
+                st.error("Please enter your name or email")
+            else:
+                findings_df = get_findings_for_principal(
+                    perm["principal_id"]
+                )
+                finding_id = (
+                    str(findings_df.iloc[0]["finding_id"])
+                    if not findings_df.empty
+                    else str(uuid.uuid4())
+                )
+
+                success = save_remediation_action(
+                    finding_id        = finding_id,
+                    principal_id      = perm["principal_id"],
+                    principal_name    = perm["principal_name"],
+                    native_permission = perm["native_permission"],
+                    database_name     = perm["database_name"],
+                    sql_instance      = perm["sql_instance"],
+                    environment       = env,
+                    snow_cr_number    = snow_cr,
+                    notes             = cr_notes,
+                    actioned_by       = actioned_by,
+                )
+
+                if success:
+                    st.success(
+                        f"✅ {env} change {snow_cr} saved to audit trail"
+                    )
+                    st.cache_data.clear()
+                else:
+                    st.error("Failed to save to audit trail — try again")
+
+    # ── TAB 2 — Accept Risk ───────────────────────────────────────────────────
+    with tab2:
+        st.markdown("#### Accept Risk")
+        st.caption(
+            "Use when the permission is required and cannot be removed. "
+            "A risk reference from the internal register is mandatory."
+        )
+
+        risk_ref = st.text_input(
+            "Risk Register Reference",
+            placeholder="RISK-2026-04821"
+        )
+
+        review_date = st.date_input(
+            "Next Review Date",
+            value=date(
+                datetime.now().year,
+                datetime.now().month,
+                min(datetime.now().day, 28)
+            ),
+            min_value=date.today()
+        )
+
+        risk_notes = st.text_area(
+            "Justification",
+            placeholder=(
+                "Explain why this permission is required "
+                "and cannot be removed at this time"
+            ),
+            height=100
+        )
+
+        risk_actioned_by = st.text_input(
+            "Your Name / Email",
+            placeholder="name@bank.com",
+            key="risk_actioned_by"
+        )
+
+        st.divider()
+
+        if st.button("✅ Confirm — Save Risk Acceptance to Audit Trail"):
+            if not risk_ref:
+                st.error("Please enter a risk register reference")
+            elif not risk_notes:
+                st.error("Please enter a justification")
+            elif not risk_actioned_by:
+                st.error("Please enter your name or email")
+            else:
+                findings_df = get_findings_for_principal(
+                    perm["principal_id"]
+                )
+                finding_id = (
+                    str(findings_df.iloc[0]["finding_id"])
+                    if not findings_df.empty
+                    else ""
+                )
+
+                success = save_risk_acceptance(
+                    finding_id        = finding_id,
+                    principal_id      = perm["principal_id"],
+                    principal_name    = perm["principal_name"],
+                    native_permission = perm["native_permission"],
+                    database_name     = perm["database_name"],
+                    sql_instance      = perm["sql_instance"],
+                    risk_ref          = risk_ref,
+                    review_date       = str(review_date),
+                    notes             = risk_notes,
+                    actioned_by       = risk_actioned_by,
+                )
+
+                if success:
+                    st.success(
+                        f"✅ Risk acceptance {risk_ref} saved to audit trail"
+                    )
+                    st.cache_data.clear()
+                else:
+                    st.error("Failed to save to audit trail — try again")
