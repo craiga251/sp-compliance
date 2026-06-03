@@ -1,15 +1,20 @@
 # SP Compliance Portal - Streamlit frontend
-# Reads classified SP data and renders risk dashboard + drilldown
+# Reads live data from BigQuery on GCP
+# Classification engine runs at load time
 
 import streamlit as st
-import pandas as pd
 import plotly.express as px
 import sys
 from pathlib import Path
 
-# Add engine to path so we can import classifier
+# Add engine to path
 sys.path.append(str(Path(__file__).parent))
-from engine.classifier import run_classification
+from engine.bigquery_client import (
+    get_classifications,
+    get_findings_for_principal,
+    get_permissions_for_principal,
+    get_scan_summary,
+)
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -17,19 +22,6 @@ st.set_page_config(
     page_icon="🔐",
     layout="wide"
 )
-
-# ── Load and classify data ────────────────────────────────────────────────────
-DATA_PATH = "data/principals.json"
-
-@st.cache_data
-def load_data():
-    results = run_classification(DATA_PATH)
-    df = pd.DataFrame(results)
-    # Convert list columns to strings so dataframe renders correctly
-    df["findings"] = df["findings"].apply(lambda x: " | ".join(x) if x else "None")
-    return df
-
-df = load_data()
 
 # ── Tier colour mapping ───────────────────────────────────────────────────────
 TIER_COLOURS = {
@@ -39,20 +31,32 @@ TIER_COLOURS = {
     "LOW":      "#2ca02c",
 }
 
+# ── Load data from BigQuery ───────────────────────────────────────────────────
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_classifications():
+    return get_classifications()
+
+@st.cache_data(ttl=300)
+def load_scan_summary():
+    return get_scan_summary()
+
+df      = load_classifications()
+summary = load_scan_summary()
+
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🔐 Service Principal Compliance Portal")
-st.caption("Prototype — sample data only")
+st.caption(f"Live data from BigQuery — sp-compliance.sp_compliance")
 
 st.divider()
 
 # ── Summary metrics row ───────────────────────────────────────────────────────
 col1, col2, col3, col4, col5 = st.columns(5)
 
-col1.metric("Total SPs",    len(df))
-col2.metric("Critical",     len(df[df["risk_tier"] == "CRITICAL"]))
-col3.metric("High",         len(df[df["risk_tier"] == "HIGH"]))
-col4.metric("Medium",       len(df[df["risk_tier"] == "MEDIUM"]))
-col5.metric("Low",          len(df[df["risk_tier"] == "LOW"]))
+col1.metric("Total SPs",  summary.get("total_principals", len(df)))
+col2.metric("Critical",   summary.get("critical_count",   len(df[df["risk_tier"] == "CRITICAL"])))
+col3.metric("High",       summary.get("high_count",       len(df[df["risk_tier"] == "HIGH"])))
+col4.metric("Medium",     summary.get("medium_count",     len(df[df["risk_tier"] == "MEDIUM"])))
+col5.metric("Low",        summary.get("low_count",        len(df[df["risk_tier"] == "LOW"])))
 
 st.divider()
 
@@ -107,11 +111,11 @@ with filter_col1:
     )
 
 with filter_col2:
-    db_options = sorted(df["database"].unique().tolist())
-    db_filter = st.multiselect(
-        "Filter by Database",
-        options=db_options,
-        default=db_options
+    instance_options = sorted(df["sql_instance"].dropna().unique().tolist())
+    instance_filter = st.multiselect(
+        "Filter by SQL Instance",
+        options=instance_options,
+        default=instance_options
     )
 
 with filter_col3:
@@ -120,7 +124,7 @@ with filter_col3:
 # ── Apply filters ─────────────────────────────────────────────────────────────
 filtered = df[
     (df["risk_tier"].isin(tier_filter)) &
-    (df["database"].isin(db_filter))
+    (df["sql_instance"].isin(instance_filter))
 ].copy()
 
 if search:
@@ -131,9 +135,9 @@ if search:
 # ── Inventory table ───────────────────────────────────────────────────────────
 display_cols = [
     "principal_name", "risk_tier", "score",
-    "sql_role", "database", "environment",
-    "direct_connect", "has_application_owner",
-    "finding_count"
+    "principal_type", "sql_instance",
+    "login_enabled", "interactive",
+    "privilege_summary", "finding_count"
 ]
 
 st.dataframe(
@@ -160,23 +164,29 @@ with drill_col1:
     st.markdown(f"### {selected['principal_name']}")
     st.metric("Risk Score", selected["score"])
     st.write(f"**Risk Tier:** {selected['risk_tier']}")
-    st.write(f"**Role:** {selected['sql_role']}")
-    st.write(f"**Database:** {selected['database']}")
-    st.write(f"**Environment:** {selected['environment']}")
-    st.write(f"**Direct Connect:** {selected['direct_connect']}")
-    st.write(f"**Has Owner:** {selected['has_application_owner']}")
-    st.write(f"**Justification on File:** {selected['justification_on_file']}")
-    st.write(f"**Last Used:** {selected['last_used_days_ago']} days ago")
-    st.write(f"**Notes:** {selected['notes']}")
+    st.write(f"**Principal Type:** {selected['principal_type']}")
+    st.write(f"**SQL Instance:** {selected['sql_instance']}")
+    st.write(f"**Login Enabled:** {selected['login_enabled']}")
+    st.write(f"**Interactive:** {selected['interactive']}")
+    st.write(f"**Privilege Summary:** {selected['privilege_summary']}")
+    st.write(f"**Recommended Action:** {selected['recommended_action']}")
 
 with drill_col2:
     st.markdown("### Findings")
-    findings_text = selected["findings"]
-    if findings_text and findings_text != "None":
-        for finding in findings_text.split(" | "):
-            st.error(f"⚠️ {finding}")
+    findings_df = get_findings_for_principal(selected["principal_id"])
+    if not findings_df.empty:
+        for _, row in findings_df.iterrows():
+            st.error(f"⚠️ {row['finding_text']}")
     else:
         st.success("✅ No findings — this principal is compliant")
 
-    st.markdown("### Recommended Action")
-    st.info(f"📋 {selected['recommended_action']}")
+    st.markdown("### Permissions")
+    perms_df = get_permissions_for_principal(selected["principal_id"])
+    if not perms_df.empty:
+        st.dataframe(
+            perms_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No permissions data available")
