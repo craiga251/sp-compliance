@@ -1,5 +1,5 @@
 # SP Compliance Platform - GCP Infrastructure
-# Provisions BigQuery dataset + tables and Cloud Storage bucket
+# Provisions BigQuery, Cloud Storage, Artifact Registry and Cloud Run
 # Region: europe-west2 (London) - keeps data in UK
 
 terraform {
@@ -66,7 +66,7 @@ resource "google_bigquery_table" "principals" {
   dataset_id          = google_bigquery_dataset.sp_compliance.dataset_id
   table_id            = "principals"
   deletion_protection = false
-  description         = "Core SP inventory - one row per login"
+  description         = "Core SP inventory - one row per login per role mapping"
 
   schema = jsonencode([
     { name = "principal_id",       type = "STRING",    mode = "REQUIRED" },
@@ -175,4 +175,72 @@ resource "google_bigquery_table" "scan_runs" {
     { name = "low_count",          type = "INTEGER",   mode = "NULLABLE" },
     { name = "source",             type = "STRING",    mode = "NULLABLE" }
   ])
+}
+
+# ── Artifact Registry — stores container images ───────────────────────────────
+resource "google_artifact_registry_repository" "sp_compliance" {
+  location      = var.region
+  repository_id = "sp-compliance"
+  format        = "DOCKER"
+  description   = "SP Compliance Portal container images"
+
+  depends_on = [google_project_service.artifactregistry]
+}
+
+# ── Service account for Cloud Run ─────────────────────────────────────────────
+resource "google_service_account" "cloudrun_sa" {
+  account_id   = "sp-compliance-cloudrun"
+  display_name = "SP Compliance Cloud Run Service Account"
+}
+
+# ── Grant Cloud Run SA access to BigQuery ─────────────────────────────────────
+resource "google_project_iam_member" "cloudrun_bq_reader" {
+  project = var.project_id
+  role    = "roles/bigquery.dataViewer"
+  member  = "serviceAccount:${google_service_account.cloudrun_sa.email}"
+}
+
+resource "google_project_iam_member" "cloudrun_bq_job_user" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.cloudrun_sa.email}"
+}
+
+# ── Cloud Run service ─────────────────────────────────────────────────────────
+resource "google_cloud_run_v2_service" "sp_compliance_portal" {
+  name     = "sp-compliance-portal"
+  location = var.region
+
+  template {
+    service_account = google_service_account.cloudrun_sa.email
+
+    containers {
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/sp-compliance/portal:latest"
+
+      ports {
+        container_port = 8080
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_service.cloudrun,
+    google_artifact_registry_repository.sp_compliance,
+  ]
+}
+
+# ── Allow public access to Cloud Run portal ───────────────────────────────────
+resource "google_cloud_run_v2_service_iam_member" "public_access" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.sp_compliance_portal.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
 }

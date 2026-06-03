@@ -27,3 +27,13 @@ output "permissions_table" {
   description = "BigQuery permissions table ID"
   value       = google_bigquery_table.permissions.table_id
 }
+
+output "artifact_registry_url" {
+  description = "Artifact Registry URL for container images"
+  value       = "${var.region}-docker.pkg.dev/${var.project_id}/sp-compliance"
+}
+
+output "cloud_run_url" {
+  description = "Cloud Run portal URL"
+  value       = google_cloud_run_v2_service.sp_compliance_portal.uri
+}
