@@ -52,21 +52,36 @@ TIER_ICONS = {
 }
 
 # ── Session state initialisation ──────────────────────────────────────────────
-if "selected_instance" not in st.session_state:
-    st.session_state.selected_instance = None
-if "selected_permission" not in st.session_state:
-    st.session_state.selected_permission = None
-if "view_level" not in st.session_state:
-    st.session_state.view_level = 1
+for key, default in {
+    "view_level":          1,
+    "selected_instance":   None,
+    "selected_permission": None,
+    "navigate_to":         None,
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-# ── Load data from BigQuery ───────────────────────────────────────────────────
-@st.cache_data(ttl=300)
-def load_server_summary():
-    return get_server_summary()
+# ── Handle deferred navigation ────────────────────────────────────────────────
+if st.session_state.navigate_to is not None:
+    st.session_state.view_level  = st.session_state.navigate_to["level"]
+    if "instance" in st.session_state.navigate_to:
+        st.session_state.selected_instance = (
+            st.session_state.navigate_to["instance"]
+        )
+    if "permission" in st.session_state.navigate_to:
+        st.session_state.selected_permission = (
+            st.session_state.navigate_to["permission"]
+        )
+    st.session_state.navigate_to = None
 
+# ── Load summary data ─────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def load_scan_summary():
     return get_scan_summary()
+
+@st.cache_data(ttl=300)
+def load_server_summary():
+    return get_server_summary()
 
 @st.cache_data(ttl=300)
 def load_instance_permissions(sql_instance: str):
@@ -78,7 +93,6 @@ servers_df = load_server_summary()
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🔐 Service Principal Compliance Portal")
 st.caption("Live data from BigQuery — sp-compliance.sp_compliance")
-
 st.divider()
 
 # ── Summary metrics row ───────────────────────────────────────────────────────
@@ -88,7 +102,6 @@ col2.metric("Critical",   summary.get("critical_count",   0))
 col3.metric("High",       summary.get("high_count",       0))
 col4.metric("Medium",     summary.get("medium_count",     0))
 col5.metric("Low",        summary.get("low_count",        0))
-
 st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -97,34 +110,34 @@ st.divider()
 if st.session_state.view_level == 1:
 
     st.subheader("Server Instance Summary")
-    st.caption("One row per server — click View Details to inspect logins and permissions")
+    st.caption(
+        "One row per server — click View Details to inspect "
+        "logins and permissions"
+    )
 
     if servers_df.empty:
         st.warning("No data available — run the CSV loader first")
     else:
-        for _, row in servers_df.iterrows():
+        for i, row in servers_df.iterrows():
             tier     = str(row.get("highest_risk_tier", "LOW"))
             icon     = TIER_ICONS.get(tier, "⚪")
             instance = str(row.get("sql_instance", ""))
 
-            with st.container():
-                c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 1, 1, 1, 1, 1, 1])
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([3, 1, 1, 1, 1, 1, 1])
+            c1.markdown(f"**{instance}**")
+            c2.markdown(f"{icon} **{tier}**")
+            c3.metric("Logins",   int(row.get("login_count",     0)))
+            c4.metric("Findings", int(row.get("total_findings",  0)))
+            c5.metric("Critical", int(row.get("critical_logins", 0)))
+            c6.metric("High",     int(row.get("high_logins",     0)))
 
-                c1.markdown(f"**{instance}**")
-                c2.markdown(f"{icon} **{tier}**")
-                c3.metric("Logins",   int(row.get("login_count",    0)))
-                c4.metric("Findings", int(row.get("total_findings", 0)))
-                c5.metric("Critical", int(row.get("critical_logins",0)))
-                c6.metric("High",     int(row.get("high_logins",    0)))
-
-                with c7:
-                    if st.button(
-                        "View Details",
-                        key=f"view_{instance}"
-                    ):
-                        st.session_state.selected_instance = instance
-                        st.session_state.view_level        = 2
-                        st.rerun()
+            with c7:
+                if st.button("View Details", key=f"btn_view_{i}"):
+                    st.session_state.navigate_to = {
+                        "level":    2,
+                        "instance": instance,
+                    }
+                    st.rerun()
 
             st.divider()
 
@@ -135,11 +148,11 @@ elif st.session_state.view_level == 2:
 
     instance = st.session_state.selected_instance
 
-    # ── Back button ───────────────────────────────────────────────────────────
-    if st.button("◀ Back to Server Summary"):
-        st.session_state.view_level        = 1
-        st.session_state.selected_instance = None
-        st.rerun()
+    nav1, nav2 = st.columns([1, 5])
+    with nav1:
+        if st.button("◀ Back to Server Summary"):
+            st.session_state.navigate_to = {"level": 1}
+            st.rerun()
 
     st.subheader(f"📋 {instance}")
     st.caption(
@@ -152,19 +165,18 @@ elif st.session_state.view_level == 2:
     if perms_df.empty:
         st.warning("No permissions data found for this instance")
     else:
-        # ── Filters ───────────────────────────────────────────────────────────
         f1, f2, f3 = st.columns(3)
-
         with f1:
-            tier_opts = sorted(perms_df["risk_tier"].dropna().unique().tolist())
+            tier_opts   = sorted(
+                perms_df["risk_tier"].dropna().unique().tolist()
+            )
             tier_filter = st.multiselect(
                 "Filter by Risk Tier",
                 options=tier_opts,
                 default=tier_opts
             )
-
         with f2:
-            login_opts = sorted(
+            login_opts   = sorted(
                 perms_df["principal_name"].dropna().unique().tolist()
             )
             login_filter = st.multiselect(
@@ -172,11 +184,9 @@ elif st.session_state.view_level == 2:
                 options=login_opts,
                 default=login_opts
             )
-
         with f3:
             perm_search = st.text_input("Search Permission", "")
 
-        # ── Apply filters ─────────────────────────────────────────────────────
         filtered = perms_df[
             (perms_df["risk_tier"].isin(tier_filter)) &
             (perms_df["principal_name"].isin(login_filter))
@@ -192,55 +202,47 @@ elif st.session_state.view_level == 2:
         filtered = filtered.sort_values(
             ["score", "principal_name", "native_permission"],
             ascending=[False, True, True]
-        )
+        ).reset_index(drop=True)
 
         st.divider()
 
-        # ── Permission grid ───────────────────────────────────────────────────
-        header = st.columns([2, 2, 1, 1, 1, 1, 1])
-        header[0].markdown("**Login**")
-        header[1].markdown("**Permission**")
-        header[2].markdown("**Role Mapping**")
-        header[3].markdown("**Database**")
-        header[4].markdown("**Risk**")
-        header[5].markdown("**Enabled**")
-        header[6].markdown("**Action**")
-
+        hdr = st.columns([2, 2, 1, 1, 1, 1, 1])
+        hdr[0].markdown("**Login**")
+        hdr[1].markdown("**Permission**")
+        hdr[2].markdown("**Role Mapping**")
+        hdr[3].markdown("**Database**")
+        hdr[4].markdown("**Risk**")
+        hdr[5].markdown("**Enabled**")
+        hdr[6].markdown("**Action**")
         st.divider()
 
         for idx, row in filtered.iterrows():
             tier = str(row.get("risk_tier", "LOW"))
             icon = TIER_ICONS.get(tier, "⚪")
-            perm_key = (
-                f"{row['principal_id']}_"
-                f"{row['native_permission']}_"
-                f"{row['database_name']}"
-            )
 
             c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 1, 1, 1, 1, 1])
-            c1.write(row.get("principal_name", ""))
-            c2.write(row.get("native_permission", ""))
-            c3.write(row.get("role_mapping", ""))
-            c4.write(row.get("database_name", ""))
+            c1.write(str(row.get("principal_name",    "")))
+            c2.write(str(row.get("native_permission", "")))
+            c3.write(str(row.get("role_mapping",      "")))
+            c4.write(str(row.get("database_name",     "")))
             c5.write(f"{icon} {tier}")
-            c6.write(str(row.get("login_enabled", "")))
+            c6.write(str(row.get("login_enabled",     "")))
 
             with c7:
-                if st.button(
-                    "Remediate",
-                    key=f"rem_{perm_key}_{idx}"
-                ):
-                    st.session_state.selected_permission = {
-                        "principal_id":      str(row["principal_id"]),
-                        "principal_name":    str(row["principal_name"]),
-                        "native_permission": str(row["native_permission"]),
-                        "role_mapping":      str(row["role_mapping"]),
-                        "database_name":     str(row["database_name"]),
-                        "sql_instance":      str(row["sql_instance"]),
-                        "risk_tier":         tier,
-                        "score":             int(row["score"]),
+                if st.button("Remediate", key=f"btn_rem_{idx}"):
+                    st.session_state.navigate_to = {
+                        "level": 3,
+                        "permission": {
+                            "principal_id":      str(row["principal_id"]),
+                            "principal_name":    str(row["principal_name"]),
+                            "native_permission": str(row["native_permission"]),
+                            "role_mapping":      str(row["role_mapping"]),
+                            "database_name":     str(row["database_name"]),
+                            "sql_instance":      str(row["sql_instance"]),
+                            "risk_tier":         tier,
+                            "score":             int(row["score"]),
+                        }
                     }
-                    st.session_state.view_level = 3
                     st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -250,15 +252,21 @@ elif st.session_state.view_level == 3:
 
     perm = st.session_state.selected_permission
 
-    # ── Back button ───────────────────────────────────────────────────────────
-    if st.button("◀ Back to Permission Grid"):
-        st.session_state.view_level          = 2
-        st.session_state.selected_permission = None
-        st.rerun()
+    nav1, nav2, nav3 = st.columns([1, 1, 4])
+    with nav1:
+        if st.button("◀ Back to Permission Grid"):
+            st.session_state.navigate_to = {
+                "level":    2,
+                "instance": perm["sql_instance"],
+            }
+            st.rerun()
+    with nav2:
+        if st.button("🏠 Home"):
+            st.session_state.navigate_to = {"level": 1}
+            st.rerun()
 
     st.subheader("🔧 Remediation Pack")
 
-    # ── Permission summary ────────────────────────────────────────────────────
     tier = perm["risk_tier"]
     icon = TIER_ICONS.get(tier, "⚪")
 
@@ -296,7 +304,6 @@ elif st.session_state.view_level == 3:
         "⚠️ Accept Risk"
     ])
 
-    # ── TAB 1 — Raise Change Request ──────────────────────────────────────────
     with tab1:
         st.markdown("#### Raise a Change Request")
         st.caption(
@@ -329,7 +336,6 @@ elif st.session_state.view_level == 3:
             placeholder="name@bank.com"
         )
 
-        # ── SNOW CR preview ───────────────────────────────────────────────────
         st.markdown("#### ServiceNow CR Template")
 
         snow_template = {
@@ -339,13 +345,13 @@ elif st.session_state.view_level == 3:
                 f"{perm['database_name']} — {env}"
             ),
             "description": (
-                f"Login:       {perm['principal_name']}\n"
-                f"Instance:    {perm['sql_instance']}\n"
-                f"Database:    {perm['database_name']}\n"
-                f"Permission:  {perm['native_permission']}\n"
-                f"Role Mapping:{perm['role_mapping']}\n"
-                f"Risk Tier:   {perm['risk_tier']}\n"
-                f"Environment: {env}\n\n"
+                f"Login:        {perm['principal_name']}\n"
+                f"Instance:     {perm['sql_instance']}\n"
+                f"Database:     {perm['database_name']}\n"
+                f"Permission:   {perm['native_permission']}\n"
+                f"Role Mapping: {perm['role_mapping']}\n"
+                f"Risk Tier:    {perm['risk_tier']}\n"
+                f"Environment:  {env}\n\n"
                 f"Notes: {cr_notes}"
             ),
             "category":         "Security",
@@ -417,7 +423,6 @@ elif st.session_state.view_level == 3:
                 else:
                     st.error("Failed to save to audit trail — try again")
 
-    # ── TAB 2 — Accept Risk ───────────────────────────────────────────────────
     with tab2:
         st.markdown("#### Accept Risk")
         st.caption(
