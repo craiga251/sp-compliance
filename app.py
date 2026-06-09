@@ -148,9 +148,13 @@ elif st.session_state.view_level == 2:
 
     instance = st.session_state.selected_instance
 
-    nav1, nav2 = st.columns([1, 5])
+    nav1, nav2, nav3 = st.columns([1, 1, 4])
     with nav1:
         if st.button("◀ Back to Server Summary"):
+            st.session_state.navigate_to = {"level": 1}
+            st.rerun()
+    with nav2:
+        if st.button("🏠 Home", key="home_l2"):
             st.session_state.navigate_to = {"level": 1}
             st.rerun()
 
@@ -261,7 +265,7 @@ elif st.session_state.view_level == 3:
             }
             st.rerun()
     with nav2:
-        if st.button("🏠 Home"):
+        if st.button("🏠 Home", key="home_l3"):
             st.session_state.navigate_to = {"level": 1}
             st.rerun()
 
